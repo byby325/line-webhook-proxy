@@ -55,6 +55,7 @@ async function saveToSheet(item, amount, date) {
 }
 
 app.post('/webhook', express.json(), async (req, res) => {
+  console.log('收到 Webhook 請求:', JSON.stringify(req.body));
   const events = req.body.events;
 
   for (let event of events) {
