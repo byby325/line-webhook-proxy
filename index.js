@@ -5,7 +5,6 @@ const { google } = require('googleapis');
 
 const app = express();
 
-// --- 設定區 ---
 const lineConfig = {
   channelAccessToken: process.env.LINE_ACCESS_TOKEN,
   channelSecret: process.env.LINE_SECRET,
@@ -14,8 +13,8 @@ const lineConfig = {
 const openai = new OpenAI({ apiKey: process.env.OPENAI_KEY });
 const lineClient = new Client(lineConfig);
 
-// Google Sheets 寫入功能
-async function saveToSheet(item, amount) {
+// 修改後的寫入功能：加入 date 參數
+async function saveToSheet(item, amount, date) {
   try {
     const auth = new google.auth.JWT(
       process.env.GOOGLE_EMAIL,
@@ -26,23 +25,23 @@ async function saveToSheet(item, amount) {
 
     const sheets = google.sheets({ version: 'v4', auth });
     const spreadsheetId = process.env.SHEET_ID;
-    const targetSheet = 'MR202512'; // 你指定的分頁
+    const targetSheet = 'MR202512'; 
 
-    // 準備寫入的資料列
-    // A: 消費日, B: 入帳日, C: 明細, D, E (留空), F: 金額
-    const today = new Date().toLocaleDateString('zh-TW'); // 格式如 2025/12/28
+    // 使用傳入的 date，如果 ChatGPT 沒提供則用今天
+    const recordDate = date || new Date().toLocaleDateString('zh-TW');
+
     const rowData = [
-      today,  // A 欄位: 消費日
-      today,  // B 欄位: 入帳日 (通常記帳當下即入帳)
-      item,   // C 欄位: 明細
-      '',     // D 欄位: (空)
-      '',     // E 欄位: (空)
-      amount  // F 欄位: 金額
+      recordDate, // A: 消費日
+      recordDate, // B: 入帳日
+      item,       // C: 明細
+      '',         // D: (空)
+      '',         // E: (空)
+      amount      // F: 金額
     ];
 
     await sheets.spreadsheets.values.append({
       spreadsheetId: spreadsheetId,
-      range: `${targetSheet}!A:F`,
+      range: `${targetSheet}!A1`, // 修改為 A1，讓它從頭尋找最後一行
       valueInputOption: 'USER_ENTERED',
       requestBody: {
         values: [rowData],
@@ -55,7 +54,6 @@ async function saveToSheet(item, amount) {
   }
 }
 
-// --- Webhook 處理 ---
 app.post('/webhook', express.json(), async (req, res) => {
   const events = req.body.events;
 
@@ -64,13 +62,18 @@ app.post('/webhook', express.json(), async (req, res) => {
       const userMessage = event.message.text;
 
       try {
-        // 1. 叫 ChatGPT 解析文字
+        // 取得今天日期作為 ChatGPT 的參考基準
+        const todayInfo = new Date().toLocaleDateString('zh-TW');
+
         const completion = await openai.chat.completions.create({
-          model: "gpt-4o-mini", // 使用最新最便宜的模型
+          model: "gpt-4o-mini",
           messages: [
             { 
               role: "system", 
-              content: "你是一個記帳助手。請從使用者的文字中提取『消費項目』與『金額』。請只回傳 JSON 格式，例如：{\"item\": \"午餐\", \"amount\": 150}。如果無法解析，請回傳 null。" 
+              content: `你是一個記帳助手。今天是 ${todayInfo}。
+              請從文字中提取『項目』、『金額』及『日期』。
+              若使用者說『昨天』或『前天』，請根據今天日期計算出正確的 YYYY/MM/DD。
+              請只回傳 JSON：{"item": "...", "amount": 100, "date": "YYYY/MM/DD"}。`
             },
             { role: "user", content: userMessage }
           ],
@@ -80,21 +83,18 @@ app.post('/webhook', express.json(), async (req, res) => {
         const data = JSON.parse(completion.choices[0].message.content);
 
         if (data && data.item && data.amount) {
-          // 2. 寫入 Google Sheet
-          const success = await saveToSheet(data.item, data.amount);
+          // 將解析出來的日期傳入寫入功能
+          const success = await saveToSheet(data.item, data.amount, data.date);
           
           if (success) {
             await lineClient.replyMessage(event.replyToken, {
               type: 'text',
-              text: `✅ 已記錄到 MR202512\n項目：${data.item}\n金額：$${data.amount}`
+              text: `✅ 已記錄到 MR202512\n日期：${data.date || todayInfo}\n項目：${data.item}\n金額：$${data.amount}`
             });
-          } else {
-            throw new Error('Sheet write failed');
           }
         }
       } catch (err) {
         console.error('Process Error:', err);
-        // 解析失敗或出錯時的回應
       }
     }
   }
@@ -102,6 +102,4 @@ app.post('/webhook', express.json(), async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`伺服器正在運行在埠號 ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Server running on ${PORT}`));
